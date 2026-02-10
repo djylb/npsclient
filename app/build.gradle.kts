@@ -1,8 +1,8 @@
 import java.util.Properties
 
-val appVersionCode = 99
-val appVersionName = "1.3.16"
-val npsVersion = "0.34.1"
+val appVersionCode = 100
+val appVersionName = "1.3.17"
+val npsVersion = "0.34.2"
 val npcFileName = "libnpc.so"
 
 plugins {
