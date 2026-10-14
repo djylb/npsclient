@@ -1,8 +1,6 @@
 package com.duanlab.npsclient
 
 import android.Manifest
-import android.app.NotificationChannel
-import android.app.NotificationManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -40,9 +38,9 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -53,8 +51,11 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.lifecycleScope
 import com.duanlab.npsclient.ui.theme.NPSClientTheme
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 
@@ -70,18 +71,27 @@ class MainActivity : ComponentActivity() {
     private val logText = MutableStateFlow("")
 
     private lateinit var mService: ShellService
-    private var mBound = false
+    private var mBound by mutableStateOf(false)
+    private var bindingRegistered = false
+    private var serviceCollection: Job? = null
+    private var lastError by mutableStateOf<String?>(null)
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(className: ComponentName, service: IBinder) {
             mService = (service as ShellService.LocalBinder).getService()
             mBound = true
-            mService.lifecycleScope.launch {
-                mService.logText.collect { logText.value = it }
+            serviceCollection?.cancel()
+            serviceCollection = lifecycleScope.launch {
+                repeatOnLifecycle(Lifecycle.State.STARTED) {
+                    launch { mService.logText.collect { logText.value = it } }
+                    launch { mService.activeConfigs.collect { shellRunningState.value = it.isNotEmpty() } }
+                    launch { mService.lastError.collect { lastError = it } }
+                }
             }
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
+            serviceCollection?.cancel()
             mBound = false
         }
     }
@@ -99,7 +109,6 @@ class MainActivity : ComponentActivity() {
         }
 
         checkNotificationPermission()
-        createBGNotificationChannel()
 
         enableEdgeToEdge()
         setContent {
@@ -108,7 +117,7 @@ class MainActivity : ComponentActivity() {
             }
         }
         Intent(this, ShellService::class.java).also {
-            bindService(
+            bindingRegistered = bindService(
                 it,
                 connection,
                 Context.BIND_AUTO_CREATE
@@ -126,7 +135,6 @@ class MainActivity : ComponentActivity() {
         LaunchedEffect(log) {
             logScrollState.animateScrollTo(logScrollState.maxValue)
         }
-        rememberCoroutineScope()
 
         Scaffold(
             topBar = {
@@ -172,11 +180,8 @@ class MainActivity : ComponentActivity() {
                             Text(getString(R.string.start_switch))
                             Switch(
                                 checked = shellRunningState.value,
+                                enabled = mBound,
                                 onCheckedChange = { newVal ->
-                                    shellRunningState.value = newVal
-                                    preferences.edit()
-                                        .putBoolean(PreferencesKey.SHELL_RUNNING, newVal)
-                                        .apply()
                                     if (newVal) startShell() else stopShell()
                                 }
                             )
@@ -213,6 +218,7 @@ class MainActivity : ComponentActivity() {
                                 startShell()
                             }
                         },
+                        enabled = mBound,
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text(getString(R.string.save))
@@ -236,7 +242,7 @@ class MainActivity : ComponentActivity() {
                             }
                         )
                         Spacer(modifier = Modifier.weight(1f))
-                        Button(onClick = { mService.clearLog() }) {
+                        Button(enabled = mBound, onClick = { mService.clearLog() }) {
                             Text(getString(R.string.clear))
                         }
                         Spacer(modifier = Modifier.weight(1f))
@@ -250,6 +256,9 @@ class MainActivity : ComponentActivity() {
                             Text(stringResource(R.string.copy))
                         }
                     }
+                }
+                lastError?.let { message ->
+                    Text(text = message, color = MaterialTheme.colorScheme.error)
                 }
                 SelectionContainer {
                     Box(
@@ -281,10 +290,12 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun stopShell() {
-        val config = NpsConfig(cmdTextState.value)
+        if (!mBound) return
+        // Stop actual running configurations, not the currently edited command.
+        val configs = ArrayList(mService.activeConfigs.value)
         val intent = Intent(this, ShellService::class.java).apply {
             action = ShellServiceAction.STOP
-            putParcelableArrayListExtra(IntentExtraKey.NpsConfig, arrayListOf(config))
+            putParcelableArrayListExtra(IntentExtraKey.NpsConfig, configs)
         }
         startService(intent)
     }
@@ -314,24 +325,13 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun createBGNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val name = getString(R.string.notification_channel_name)
-            val descriptionText = getString(R.string.notification_channel_desc)
-            val importance = NotificationManager.IMPORTANCE_MIN
-            val channel = NotificationChannel("shell_bg", name, importance).apply {
-                description = descriptionText
-            }
-            val notificationManager = getSystemService(NotificationManager::class.java)
-            notificationManager.createNotificationChannel(channel)
-        }
-    }
-
     override fun onDestroy() {
+        serviceCollection?.cancel()
         super.onDestroy()
-        if (mBound) {
+        if (bindingRegistered) {
             unbindService(connection)
-            mBound = false
+            bindingRegistered = false
         }
+        mBound = false
     }
 }

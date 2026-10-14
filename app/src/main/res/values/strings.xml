@@ -14,4 +14,8 @@
     <string name="service_stop_toast">NPC Service Stopped</string>
     <string name="copy">Copy</string>
     <string name="copied">Copied</string>
+    <string name="invalid_command">Invalid NPC arguments: check quotes and escaping.</string>
+    <string name="process_start_failed">NPC process failed (%1$s). Check the installed binary and execution permissions.</string>
+    <string name="process_failed">NPC exited unexpectedly with code %1$d.</string>
+    <string name="process_exited">NPC exited with code %1$d.</string>
 </resources>

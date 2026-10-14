@@ -1,35 +1,52 @@
 package com.duanlab.npsclient
 
 import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.os.Binder
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
 import android.util.Log
-import android.widget.Toast
+import android.os.Looper
 import androidx.core.app.NotificationCompat
 import androidx.lifecycle.LifecycleService
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.update
-import java.io.File
 
 class ShellService : LifecycleService() {
-    private val _processThreads = MutableStateFlow(mutableMapOf<NpsConfig, ShellThread>())
+    // Process bookkeeping is confined to the main thread; the log buffer is synchronized.
+    private val processThreads = mutableMapOf<NpsConfig, ShellThread>()
+    private val mainHandler = Handler(Looper.getMainLooper())
+    @Volatile private var destroyed = false
+    private val _activeConfigs = MutableStateFlow<Set<NpsConfig>>(emptySet())
+    val activeConfigs: StateFlow<Set<NpsConfig>> = _activeConfigs
     private val _logText = MutableStateFlow("")
     val logText: StateFlow<String> = _logText
-
-    fun clearLog() {
-        _logText.value = ""
-    }
-
+    private val _lastError = MutableStateFlow<String?>(null)
+    val lastError: StateFlow<String?> = _lastError
+    private val logLines = ArrayDeque<String>()
+    private var logCharacters = 0
+    private val preferences by lazy { getSharedPreferences(PreferencesKey.PREF_NAME, Context.MODE_PRIVATE) }
     private val binder = LocalBinder()
 
     inner class LocalBinder : Binder() {
         fun getService(): ShellService = this@ShellService
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            getSystemService(NotificationManager::class.java).createNotificationChannel(
+                NotificationChannel("shell_bg", getString(R.string.notification_channel_name),
+                    NotificationManager.IMPORTANCE_LOW).apply {
+                    description = getString(R.string.notification_channel_desc)
+                }
+            )
+        }
     }
 
     override fun onBind(intent: Intent): IBinder {
@@ -39,127 +56,105 @@ class ShellService : LifecycleService() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
-        val npsConfigs: ArrayList<NpsConfig>? =
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                intent?.extras?.getParcelableArrayList(
-                    IntentExtraKey.NpsConfig,
-                    NpsConfig::class.java
-                )
-            } else {
-                @Suppress("DEPRECATION") intent?.extras?.getParcelableArrayList(IntentExtraKey.NpsConfig)
-            }
-        if (npsConfigs == null) {
-            Log.e("ShellService", "npsConfig is null")
-            Toast.makeText(this, "npsConfig is null", Toast.LENGTH_SHORT).show()
-            return START_NOT_STICKY
+        val configs = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            intent?.getParcelableArrayListExtra(IntentExtraKey.NpsConfig, NpsConfig::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            intent?.getParcelableArrayListExtra<NpsConfig>(IntentExtraKey.NpsConfig)
         }
         when (intent?.action) {
             ShellServiceAction.START -> {
-                for (config in npsConfigs) {
-                    startNps(config)
-                }
-                Toast.makeText(this, getString(R.string.service_start_toast), Toast.LENGTH_SHORT)
-                    .show()
+                // Also required when invoked directly by the boot receiver.
                 startForeground(1, showNotification())
+                _lastError.value = null
+                configs.orEmpty().forEach(::startNps)
             }
-            ShellServiceAction.STOP -> {
-                for (config in npsConfigs) {
-                    stopNps(config)
-                }
-                startForeground(1, showNotification())
-                if (_processThreads.value.isEmpty()) {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                        stopForeground(STOP_FOREGROUND_REMOVE)
-                    } else {
-                        @Suppress("DEPRECATION") stopForeground(true)
-                    }
-                    stopSelf()
-                    Toast.makeText(this, getString(R.string.service_stop_toast), Toast.LENGTH_SHORT)
-                        .show()
-                }
-            }
+            ShellServiceAction.STOP -> configs.orEmpty().forEach(::stopNps)
         }
+        updateRunningState()
         return START_NOT_STICKY
     }
 
     private fun startNps(config: NpsConfig) {
         Log.d("ShellService", "start config: $config")
-        val ainfo = packageManager.getApplicationInfo(packageName, PackageManager.GET_SHARED_LIBRARY_FILES)
-
-        val cmdArgs = mutableListOf<String>()
-        if (config.cmdstr.contains(" nat") || config.cmdstr.startsWith("nat")) {
-            cmdArgs.add("nat")
+        if (processThreads.containsKey(config)) return
+        val args = try {
+            NpcCommand.parse(config.cmdstr)
+        } catch (_: IllegalArgumentException) {
+            _lastError.value = getString(R.string.invalid_command)
+            return
         }
-        if (config.cmdstr.contains("register ")) {
-            cmdArgs.add("register")
-        }
-        if (config.cmdstr.contains("status ")) {
-            cmdArgs.add("status")
-        }
-
-        val args = config.cmdstr
-            .split(" ")
-            .map { it.trim() }
-            .filter { it.startsWith("-") }
-            .map { arg ->
-                if ('=' in arg) {
-                    val (key, raw) = arg.split("=", limit = 2)
-                    val v = raw.trim().trim('"', '\'')
-                    "$key=$v"
-                } else {
-                    arg
+        val binary = "${applicationInfo.nativeLibraryDir}/${BuildConfig.NpcFileName}"
+        val commandList = listOf(binary) + args
+        Log.d("ShellService", "Command: ${commandList.joinToString(" ")}")
+        val thread = ShellThread(commandList, filesDir,
+            onFinished = { finished, result ->
+                mainHandler.post {
+                    if (!destroyed && processThreads[config] === finished) {
+                        processThreads.remove(config)
+                        if (!result.stopped) {
+                            val message = when {
+                                result.error != null -> getString(R.string.process_start_failed,
+                                    result.error.javaClass.simpleName)
+                                result.exitCode != 0 -> getString(R.string.process_failed, result.exitCode)
+                                else -> null
+                            }
+                            if (message != null) _lastError.value = message
+                            appendLog(message ?: getString(R.string.process_exited, result.exitCode))
+                        }
+                        updateRunningState()
+                    }
                 }
             }
-            .toMutableList()
-        if (args.none { it.startsWith("-debug=") }) {
-            args.add("-debug=false")
+        ) { line ->
+            if (!destroyed && preferences.getBoolean(PreferencesKey.LOG_OUTPUT_ENABLED, true)) {
+                appendLog(line)
+            }
         }
-        if (args.none { it.startsWith("-log=") }) {
-            args.add("-log=stdout")
-        }
-        if (args.none { it.startsWith("-log_color=") }) {
-            args.add("-log_color=false")
-        }
-        val nativeLibPath = ainfo.nativeLibraryDir
-        val binary = "$nativeLibPath/${BuildConfig.NpcFileName}"
-        val commandList = listOf(binary) + cmdArgs + args
-        Log.d("ShellService", "Command: ${commandList.joinToString(" ")}")
-        try {
-            val thread = runCommand(commandList, filesDir)
-            _processThreads.update { it.toMutableMap().apply { put(config, thread) } }
-        } catch (e: Exception) {
-            Log.e("ShellService", e.stackTraceToString())
-            Toast.makeText(this, e.message, Toast.LENGTH_LONG).show()
+        processThreads[config] = thread
+        thread.start()
+    }
+
+    private fun stopNps(config: NpsConfig) {
+        processThreads.remove(config)?.stopProcess()
+    }
+
+    private fun updateRunningState() {
+        _activeConfigs.value = processThreads.keys.toSet()
+        val running = processThreads.isNotEmpty()
+        preferences.edit().putBoolean(PreferencesKey.SHELL_RUNNING, running).apply()
+        if (!running) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
         }
     }
 
-    private fun stopNps(config: NpsConfig) {
-        val thread = _processThreads.value[config]
-        thread?.stopProcess()
-        _processThreads.update { it.toMutableMap().apply { remove(config) } }
+    @Synchronized
+    private fun appendLog(line: String) {
+        val bounded = line.takeLast(8192)
+        logLines.addLast(bounded)
+        logCharacters += bounded.length + 1
+        while (logLines.size > 1000 || logCharacters > 128 * 1024) {
+            logCharacters -= logLines.removeFirst().length + 1
+        }
+        _logText.value = logLines.joinToString("\n")
+    }
+
+    @Synchronized
+    fun clearLog() {
+        logLines.clear()
+        logCharacters = 0
+        _logText.value = ""
+        _lastError.value = null
     }
 
     override fun onDestroy() {
+        destroyed = true
+        processThreads.values.forEach { it.stopProcess() }
+        processThreads.clear()
+        _activeConfigs.value = emptySet()
+        mainHandler.removeCallbacksAndMessages(null)
         super.onDestroy()
-        _processThreads.value.forEach { it.value.stopProcess() }
-        _processThreads.update { it.clear(); it }
-    }
-
-    private fun runCommand(command: List<String>, dir: File): ShellThread {
-        val sharedPref = applicationContext.getSharedPreferences(PreferencesKey.PREF_NAME, Context.MODE_PRIVATE)
-        val thread = ShellThread(command, dir) { line ->
-            if (sharedPref.getBoolean(PreferencesKey.LOG_OUTPUT_ENABLED, true)) {
-                _logText.update { current ->
-                    val currentLines = if (current.isEmpty()) listOf() else current.split("\n").filter { it.isNotEmpty() }
-                    val newLines = currentLines + line
-                    val limitedLines = if (newLines.size > 1000) newLines.takeLast(1000) else newLines
-                    limitedLines.joinToString("\n") + "\n"
-                }
-            }
-        }
-        thread.start()
-        return thread
     }
 
     private fun showNotification(): Notification {
