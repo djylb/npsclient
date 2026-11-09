@@ -1,7 +1,7 @@
 import java.util.Properties
 
-val appVersionCode = 110
-val appVersionName = "1.3.27"
+val appVersionCode = 111
+val appVersionName = "1.4.0"
 val npsVersion = "0.35.0"
 val npcFileName = "libnpc.so"
 
