@@ -41,7 +41,8 @@ internal object NpcCommand {
             Regex("[A-Za-z0-9+/_-]+={0,2}").matches(args[0])) {
             args[0] = "-launch=${args[0]}"
         }
-        val defaults = listOf("debug" to "false", "log" to "stdout")
+        val defaults = listOf("debug" to "false", "log" to "stdout",
+            "disable_remote_update" to "true")
         val endOfOptions = args.indexOf("--").let { if (it < 0) args.size else it }
         val options = args.take(endOfOptions)
         val missing = defaults.filter { (name, _) ->
