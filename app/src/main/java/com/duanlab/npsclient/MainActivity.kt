@@ -1,6 +1,7 @@
 package com.duanlab.npsclient
 
 import android.Manifest
+import android.content.ClipData
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -40,12 +41,13 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.ClipEntry
+import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
@@ -129,7 +131,8 @@ class MainActivity : ComponentActivity() {
     @Preview(showBackground = true)
     @Composable
     fun MainContent() {
-        val clipboardManager = LocalClipboardManager.current
+        val clipboard = LocalClipboard.current
+        val coroutineScope = rememberCoroutineScope()
         val log by logText.collectAsState()
         val logScrollState = rememberScrollState()
         LaunchedEffect(log) {
@@ -247,11 +250,14 @@ class MainActivity : ComponentActivity() {
                         }
                         Spacer(modifier = Modifier.weight(1f))
                         Button(onClick = {
-                            clipboardManager.setText(AnnotatedString(log))
-                            if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.S_V2)
-                                Toast.makeText(
-                                    this@MainActivity, getString(R.string.copied), Toast.LENGTH_SHORT
-                                ).show()
+                            val textToCopy = log
+                            coroutineScope.launch {
+                                clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("", textToCopy)))
+                                if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.S_V2)
+                                    Toast.makeText(
+                                        this@MainActivity, getString(R.string.copied), Toast.LENGTH_SHORT
+                                    ).show()
+                            }
                         }) {
                             Text(stringResource(R.string.copy))
                         }
