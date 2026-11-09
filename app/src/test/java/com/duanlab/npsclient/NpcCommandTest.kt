@@ -39,6 +39,22 @@ class NpcCommandTest {
         assertEquals(listOf("-vkey=", "-name=a b", "-literal=\$HOME; echo x", "-path=a\\b"), args.take(4))
     }
 
+    @Test fun acceptsABareLaunchUrl() {
+        assertEquals(listOf("-launch=npc://key@host:8024?type=tls", "-debug=false", "-log=stdout"),
+            NpcCommand.parse("npc://key@host:8024?type=tls"))
+        assertEquals(listOf("-launch=https://example.com/a.conf", "-debug=false", "-log=stdout"),
+            NpcCommand.parse("npc https://example.com/a.conf"))
+        assertEquals(listOf("-launch=npc://a@h:1", "-debug=false", "-log=stdout"),
+            NpcCommand.parse("-launch=npc://a@h:1"))
+    }
+
+    @Test fun acceptsABareBase64Launch() {
+        assertEquals(listOf("-launch=H4sIAAAAAAAAA8tLLS4BAA==", "-debug=false", "-log=stdout"),
+            NpcCommand.parse("npc H4sIAAAAAAAAA8tLLS4BAA=="))
+        assertEquals("status", NpcCommand.parse("status").first())
+        assertEquals("update-force", NpcCommand.parse("update-force").first())
+    }
+
     @Test fun addsDefaultsBeforeEndOfOptions() {
         assertEquals(listOf("-debug=false", "-log=stdout", "--", "-log=foo"),
             NpcCommand.parse("-- -log=foo"))
