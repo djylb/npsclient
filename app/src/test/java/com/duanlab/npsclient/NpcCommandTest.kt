@@ -12,20 +12,20 @@ class NpcCommandTest {
 
     @Test fun preservesCommaListsEqualsInValuesAndQuotedEqualsValues() {
         assertEquals(listOf("-server=xxx:123,yyy:456", "-vkey=a=b==,key2", "-type=tls,tcp",
-            "-log_level=6", "-debug=false", "-log=stdout", "-log_color=false"),
+            "-log_level=6", "-debug=false", "-log=stdout"),
             NpcCommand.parse("-server=\"xxx:123,yyy:456\" -vkey='a=b==,key2' " +
                 "-type=tls,tcp -log_level=6"))
     }
 
     @Test fun keepsSubcommandAndAddsOnlyMissingDefaults() {
-        assertEquals(listOf("nat", "-server=host:8024", "-debug=true", "-log=stderr", "-log_color=false"),
+        assertEquals(listOf("nat", "-server=host:8024", "-debug=true", "-log=stderr"),
             NpcCommand.parse("npc nat -server=host:8024 -debug=true -log=stderr"))
     }
 
     @Test fun preservesSeparateValuesAndQuotedWhitespace() {
         val args = NpcCommand.parse("-server host:8024\t-vkey 'a b' -log=\"some file\"")
         assertEquals(listOf("-server", "host:8024", "-vkey", "a b", "-log=some file",
-            "-debug=false", "-log_color=false"), args)
+            "-debug=false"), args)
     }
 
     @Test fun preservesExplicitDefaultsAndStandaloneSubcommands() {
@@ -40,7 +40,7 @@ class NpcCommandTest {
     }
 
     @Test fun addsDefaultsBeforeEndOfOptions() {
-        assertEquals(listOf("-debug=false", "-log=stdout", "-log_color=false", "--", "-log=foo"),
+        assertEquals(listOf("-debug=false", "-log=stdout", "--", "-log=foo"),
             NpcCommand.parse("-- -log=foo"))
     }
 

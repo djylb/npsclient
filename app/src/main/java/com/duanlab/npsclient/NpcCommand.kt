@@ -28,7 +28,7 @@ internal object NpcCommand {
         // Accept the optional executable prefix used by copied NPC commands.
         if (args.first() == "npc" || args.first() == "./npc") args.removeAt(0)
         require(args.isNotEmpty()) { "Missing NPC arguments" }
-        val defaults = listOf("debug" to "false", "log" to "stdout", "log_color" to "false")
+        val defaults = listOf("debug" to "false", "log" to "stdout")
         val endOfOptions = args.indexOf("--").let { if (it < 0) args.size else it }
         val options = args.take(endOfOptions)
         val missing = defaults.filter { (name, _) ->
