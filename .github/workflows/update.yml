@@ -21,16 +21,17 @@ jobs:
           sudo apt-get install -y curl wget tar jq
 
       - name: Get NPS version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           current_nps_version=$(grep -oP '^val npsVersion = "\K[0-9\.]+' app/build.gradle.kts | xargs)
           echo "Current NPS version: '$current_nps_version'"
-          
-          latest_version=$(curl --silent "https://api.github.com/repos/djylb/nps/releases/latest" | jq -r .tag_name)
-          if [ "$latest_version" = "null" ] || [ -z "$latest_version" ]; then
-            echo "Failed to retrieve remote version, using current version."
-            latest_version_no_v="$current_nps_version"
-          else
-            latest_version_no_v=$(echo "$latest_version" | sed 's/^v//' | xargs)
+
+          latest_version=$(curl -fsS -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/djylb/nps/releases/latest" | jq -r .tag_name)
+          latest_version_no_v=${latest_version#v}
+          if ! [[ "$latest_version_no_v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Unexpected latest release tag: $latest_version"
+            exit 1
           fi
           echo "Latest NPS version: '$latest_version_no_v'"
           echo "CURRENT_VERSION=$current_nps_version" >> $GITHUB_ENV
@@ -69,8 +70,14 @@ jobs:
       - name: Download NPC client libs
         run: |
           set -eux
-          curl -fL "https://github.com/djylb/nps/releases/latest/download/android_libs_client.tar.gz" \
-            -o android_libs_client.tar.gz
+          # The release's own files, not latest's: the jobs that upload them
+          # may still be running when this starts.
+          url="https://github.com/djylb/nps/releases/download/v${LATEST_VERSION}/android_libs_client.tar.gz"
+          for i in $(seq 1 20); do
+            curl -fsSL "$url" -o android_libs_client.tar.gz && break
+            [ "$i" -lt 20 ] || exit 1
+            sleep 30
+          done
           tar -tzf android_libs_client.tar.gz | sort | sed 's/^/  /'
 
       - name: Extract libs into jniLibs
